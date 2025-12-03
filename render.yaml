@@ -16,4 +16,3 @@ services:
     envVars:
       - key: SCRAPERAPI_KEY
         sync: false
-
