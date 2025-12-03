@@ -17,6 +17,9 @@ def slugify(s: str) -> str:
     s = re.sub(r'[\s_]+', '-', s)
     return s.strip('-')
 
+def log(msg):
+    print(msg)
+
 def extract_bhk_from_text(text):
     if not text:
         return None
@@ -90,9 +93,12 @@ async def fetch_html(url):
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
+            log(f"📡 Fetching: {url}")
             await page.goto(url, timeout=20000)
             content = await page.content()
-        except Exception:
+            log(f"🔎 Fetched HTML length: {len(content)}")
+        except Exception as e:
+            log(f"❌ Error fetching {url}: {e}")
             content = ""
         await browser.close()
         return content
@@ -102,6 +108,7 @@ async def fetch_html(url):
 # -----------------------------
 def duck_search_listings(society, city, max_results=25):
     q = f"{society} {city} for rent site:nobroker.in"
+    log(f"🔍 DDG fallback search: {q}")
     listings = []
     with DDGS() as ddgs:
         for r in ddgs.text(q, max_results=max_results):
@@ -116,6 +123,7 @@ def duck_search_listings(society, city, max_results=25):
             if is_bad_listing(href, title):
                 continue
             listings.append(href)
+    log(f"  DDG found {len(listings)} candidate listings")
     return listings
 
 # -----------------------------
@@ -124,51 +132,61 @@ def duck_search_listings(society, city, max_results=25):
 async def process_listing_urls(urls, society):
     grouped = {}
     for i, url in enumerate(urls, start=1):
+        log(f"[{i}/{len(urls)}] Checking {url}")
         rent = extract_rent_from_url(url)
-        # fetch HTML
         html = await fetch_html(url)
         soup = BeautifulSoup(html, "html.parser")
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else ""
         if society.lower() not in title.lower() and society.lower() not in url.lower():
+            log(f"  Skipped: does not match society")
             continue
         bhk = extract_bhk_from_text(title) or extract_bhk_from_text(url)
         if rent is None:
             rent = parse_int_from_text(html)
         if not bhk or rent is None:
+            log(f"  Skipped: missing bhk or rent")
             continue
         # sanity filters
         if rent >= 500_000:
+            log(f"  Skipped: too high rent {rent}")
             continue
         try:
             bhk_num = int(re.search(r'(\d+)', bhk).group(1))
         except:
             bhk_num = None
         if bhk_num and bhk_num >= 2 and rent < 20000:
+            log(f"  Skipped: too low rent for {bhk} -> {rent}")
             continue
         if bhk_num == 1 and rent < 5000:
+            log(f"  Skipped: too low rent for 1 BHK -> {rent}")
             continue
         grouped.setdefault(bhk, []).append(rent)
+        log(f"  Collected {bhk} -> ₹{rent:,}")
     best = {bhk: max(rents) for bhk, rents in grouped.items()}
+    log(f"✅ Best rents per BHK: {best}")
     return best
 
 # -----------------------------
 # Orchestrator
 # -----------------------------
 async def scrape_for_society(society, city):
+    log(f"\n=== 🏙 FETCHING FOR: {society}, {city} ===")
     candidates = build_society_url_candidates(society, city)
     all_urls = []
     for u in candidates:
         html = await fetch_html(u)
         urls = extract_listing_urls_from_html(html)
+        log(f"  Candidate {u} found {len(urls)} listing URLs")
         if urls:
             all_urls.extend(urls)
             break
     all_urls = list(dict.fromkeys(all_urls))  # dedupe
     if not all_urls:
-        # DDG fallback
+        log("No society-page listings found, using DDG fallback")
         ddg_urls = duck_search_listings(society, city, max_results=30)
         all_urls.extend(ddg_urls)
     if not all_urls:
+        log("❌ No listings found even after DDG fallback")
         return {}
     best = await process_listing_urls(all_urls, society)
     return best
