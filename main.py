@@ -1,254 +1,81 @@
-import re
-import asyncio
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-from bs4 import BeautifulSoup
-from ddgs import DDGS
-from playwright.async_api import async_playwright
+import asyncio
+from playwright.async_api import async_playwright, Error as PlaywrightError
+import urllib.parse
 
-app = FastAPI()
+app = FastAPI(title="Rent Scraper")
 
-# -----------------------------
-# Utilities
-# -----------------------------
-def slugify(s: str) -> str:
-    s = s.strip()
-    s = re.sub(r'[^\w\s-]', '', s)
-    s = re.sub(r'[\s_]+', '-', s)
-    return s.strip('-')
+# -------------------------------
+# UTILITY: Fetch HTML for a URL
+# -------------------------------
+async def fetch_html(url: str) -> str:
+    """
+    Fetch HTML content of a URL using Playwright Chromium headless.
+    Automatically installs browsers if missing.
+    """
+    try:
+        async with async_playwright() as pw:
+            # Install browsers at runtime if not installed
+            await pw.chromium.install()  
 
-def log(msg):
-    print(msg)
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto(url)
+            html = await page.content()
+            await browser.close()
+            return html
 
-def extract_bhk_from_text(text):
-    if not text:
-        return None
-    m = re.search(r'(\d+)\s*[-]?\s*BHK', text, flags=re.IGNORECASE)
-    if m:
-        return f"{int(m.group(1))} BHK"
-    return None
+    except PlaywrightError as e:
+        raise RuntimeError(f"Playwright error: {e}")
 
-def parse_int_from_text(s):
-    if not s:
-        return None
-    m = re.findall(r'₹\s*([0-9,]+)', s)
-    if m:
-        nums = [int(x.replace(',', '')) for x in m]
-        return max(nums)
-    m2 = re.findall(r'\b([0-9]{4,7})\b', s)
-    if m2:
-        nums = [int(x) for x in m2]
-        return max(nums)
-    return None
+# -------------------------------
+# SCRAPE LOGIC (example)
+# -------------------------------
+async def scrape_for_society(society: str, city: str):
+    """
+    Scrapes rent listings for a given society & city.
+    Modify this function with your actual scraping logic.
+    """
+    query = urllib.parse.quote(society)
+    city_enc = urllib.parse.quote(city)
+    url = f"https://example.com/rent?society={query}&city={city_enc}"  # Replace with actual URL
 
-def extract_rent_from_url(url):
-    m = re.search(r'for-rs-([0-9,]+)', url.replace(',', ''))
-    if m:
-        return int(m.group(1))
-    return None
+    html = await fetch_html(url)
+    
+    # Example: return raw HTML (you should parse it)
+    return {"society": society, "city": city, "html_length": len(html)}
 
-def is_bad_listing(url, title):
-    low = (url + " " + (title or "")).lower()
-    bad_tokens = [
-        "for-lease", "lease", "single-room", "single room",
-        "roommate", "roommates", "pg", "hostel", "shared",
-        "shared-room", "/review", "review", "project", "prjt"
-    ]
-    return any(t in low for t in bad_tokens)
-
-
-# -----------------------------
-# Society URL candidates
-# -----------------------------
-def build_society_url_candidates(society_raw, city_raw):
-    society = slugify(society_raw)
-    city = slugify(city_raw)
-    candidates = [
-        f"https://www.nobroker.in/property/rent/{city}/{society}-{city}",
-        f"https://www.nobroker.in/property/rent/{city}/{society}_{city}",
-        f"https://www.nobroker.in/property/rent/{society}_{city}",
-        f"https://www.nobroker.in/property/rent/{society}-{city}",
-        f"https://www.nobroker.in/property/rent/{society}"
-    ]
-    seen = set()
-    out = []
-    for u in candidates:
-        if u not in seen:
-            seen.add(u)
-            out.append(u)
-    return out
-
-
-# -----------------------------
-# Extract listing URLs
-# -----------------------------
-def extract_listing_urls_from_html(html):
-    soup = BeautifulSoup(html, "html.parser")
-    urls = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "/property/" in href and "for-rs-" in href:
-            full = href if href.startswith("http") else ("https://www.nobroker.in" + href)
-            urls.add(full)
-    return list(urls)
-
-
-# -----------------------------
-# Playwright fetch
-# -----------------------------
-async def fetch_html(url):
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
-        )
-        page = await browser.new_page()
-        try:
-            log(f"📡 Fetching: {url}")
-            await page.goto(url, timeout=20000)
-            content = await page.content()
-            log(f"🔎 HTML length: {len(content)}")
-        except Exception as e:
-            log(f"❌ Error fetching {url}: {e}")
-            content = ""
-        await browser.close()
-        return content
-
-
-# -----------------------------
-# DDG fallback search
-# -----------------------------
-def duck_search_listings(society, city, max_results=25):
-    q = f"{society} {city} for rent site:nobroker.in"
-    log(f"🔍 DDG fallback search: {q}")
-
-    listings = []
-    with DDGS() as ddgs:
-        for r in ddgs.text(q, max_results=max_results):
-            href = r.get("href")
-            title = r.get("title") or ""
-            if not href:
-                continue
-
-            # Clean redirect links
-            href = re.sub(r'^.*uddg=', '', href) if "uddg=" in href else href
-
-            href_low = href.lower()
-            if "nobroker.in/property" not in href_low:
-                continue
-            if "for-rs-" not in href_low:
-                continue
-            if is_bad_listing(href, title):
-                continue
-
-            listings.append(href)
-
-    log(f"  DDG found {len(listings)} listings")
-    return listings
-
-
-# -----------------------------
-# Process listings
-# -----------------------------
-async def process_listing_urls(urls, society):
-    grouped = {}
-
-    for i, url in enumerate(urls, start=1):
-        log(f"[{i}/{len(urls)}] Checking {url}")
-
-        rent = extract_rent_from_url(url)
-        html = await fetch_html(url)
-
-        soup = BeautifulSoup(html, "html.parser")
-        title = soup.find("h1").get_text(strip=True) if soup.find("h1") else ""
-
-        if society.lower() not in title.lower() and society.lower() not in url.lower():
-            log("  Skipped: not matching society")
-            continue
-
-        bhk = extract_bhk_from_text(title) or extract_bhk_from_text(url)
-        if rent is None:
-            rent = parse_int_from_text(html)
-
-        if not bhk or rent is None:
-            log("  Skipped: missing BHK or rent")
-            continue
-
-        # sanity filters
-        if rent >= 500_000:
-            log(f"  Skipped: too high rent: {rent}")
-            continue
-
-        try:
-            bhk_num = int(re.search(r'(\d+)', bhk).group(1))
-        except:
-            bhk_num = None
-
-        if bhk_num and bhk_num >= 2 and rent < 20000:
-            log(f"  Skipped: too low for {bhk}: {rent}")
-            continue
-        if bhk_num == 1 and rent < 5000:
-            log(f"  Skipped: too low for 1 BHK: {rent}")
-            continue
-
-        grouped.setdefault(bhk, []).append(rent)
-        log(f"  ✔ Collected {bhk} → ₹{rent:,}")
-
-    best = {bhk: max(rents) for bhk, rents in grouped.items()}
-    log(f"✅ Best rents per BHK: {best}")
-    return best
-
-
-# -----------------------------
-# Orchestrator
-# -----------------------------
-async def scrape_for_society(society, city):
-    log(f"\n=== 🏙 FETCHING FOR: {society}, {city} ===")
-
-    candidates = build_society_url_candidates(society, city)
-    all_urls = []
-
-    for u in candidates:
-        html = await fetch_html(u)
-        urls = extract_listing_urls_from_html(html)
-        log(f"  Candidate {u} → {len(urls)} listings")
-
-        if urls:
-            all_urls.extend(urls)
-            break
-
-    # dedupe
-    all_urls = list(dict.fromkeys(all_urls))
-
-    if not all_urls:
-        log("⚠️ No listings from society page, trying DDG fallback…")
-        all_urls = duck_search_listings(society, city, max_results=30)
-
-    if not all_urls:
-        log("❌ No listings found even after DDG fallback")
-        return {}
-
-    best = await process_listing_urls(all_urls, society)
-    return best
-
-
-# -----------------------------
-# Root health endpoint (IMPORTANT FOR RENDER)
-# -----------------------------
-@app.get("/")
-def home():
-    return {"status": "OK", "message": "Rent backend running"}
-
-
-# -----------------------------
-# Main API endpoint
-# -----------------------------
+# -------------------------------
+# API ENDPOINT
+# -------------------------------
 @app.get("/rent")
-async def get_rent(society: str = Query(...), city: str = Query(...)):
-    best = await scrape_for_society(society, city)
-    return JSONResponse({
-        "society": society,
-        "city": city,
-        "total_results": len(best),
-        "results": best
-    })
+async def get_rent(
+    society: str = Query(..., description="Name of the society"),
+    city: str = Query(..., description="City name")
+):
+    """
+    Returns rent listings for a society.
+    """
+    try:
+        result = await scrape_for_society(society, city)
+        return JSONResponse(content=result)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+
+# -------------------------------
+# HEALTH CHECK
+# -------------------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Rent Scraper API is running."}
+
+# -------------------------------
+# MAIN ENTRYPOINT (for local dev)
+# -------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
