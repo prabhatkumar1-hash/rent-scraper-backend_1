@@ -41,16 +41,33 @@ def build_scraperapi_url(target_url: str) -> str:
     from urllib.parse import quote_plus
     return f"http://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={quote_plus(target_url)}&render=true"
 
-async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
-    url = build_scraperapi_url(url)
+async def fetch_html(client: httpx.AsyncClient, url: str, site_name: str) -> Optional[str]:
+    wrapped_url = build_scraperapi_url(url)
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
+
+    print(f"\n========== Fetching {site_name} ==========")
+    print("URL:", wrapped_url)
+
     try:
-        r = await client.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        return r.text
+        r = await client.get(wrapped_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        print(f"Status {site_name}: {r.status_code}")
+
+        if r.status_code != 200:
+            print(f"[ERROR] {site_name} blocked or returned non-200.")
+            return None
+
+        html = r.text
+        print(f"HTML length {site_name}: {len(html)}")
+
+        # Show first 200 chars of HTML to detect blank pages
+        print("HTML Preview:", html[:200].replace("\n", " "))
+
+        return html
+
     except Exception as e:
-        # If ScraperAPI used and failed, bubble up so caller can decide
-        raise
+        print(f"[EXCEPTION] {site_name} failed:", str(e))
+        return None
+
 
 def parse_price_int(text: str) -> Optional[int]:
     if not text:
