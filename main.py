@@ -1,4 +1,4 @@
-erimport re
+import re
 import asyncio
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
@@ -49,9 +49,13 @@ def extract_rent_from_url(url):
 
 def is_bad_listing(url, title):
     low = (url + " " + (title or "")).lower()
-    bad_tokens = ["for-lease", "lease", "single-room", "single room", "roommate", "roommates",
-                  "pg", "hostel", "shared", "shared-room", "/review", "review", "project", "prjt"]
+    bad_tokens = [
+        "for-lease", "lease", "single-room", "single room",
+        "roommate", "roommates", "pg", "hostel", "shared",
+        "shared-room", "/review", "review", "project", "prjt"
+    ]
     return any(t in low for t in bad_tokens)
+
 
 # -----------------------------
 # Society URL candidates
@@ -66,7 +70,6 @@ def build_society_url_candidates(society_raw, city_raw):
         f"https://www.nobroker.in/property/rent/{society}-{city}",
         f"https://www.nobroker.in/property/rent/{society}"
     ]
-    # dedupe
     seen = set()
     out = []
     for u in candidates:
@@ -75,6 +78,10 @@ def build_society_url_candidates(society_raw, city_raw):
             out.append(u)
     return out
 
+
+# -----------------------------
+# Extract listing URLs
+# -----------------------------
 def extract_listing_urls_from_html(html):
     soup = BeautifulSoup(html, "html.parser")
     urls = set()
@@ -85,30 +92,36 @@ def extract_listing_urls_from_html(html):
             urls.add(full)
     return list(urls)
 
+
 # -----------------------------
-# Async Playwright fetch
+# Playwright fetch
 # -----------------------------
 async def fetch_html(url):
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
         page = await browser.new_page()
         try:
             log(f"📡 Fetching: {url}")
             await page.goto(url, timeout=20000)
             content = await page.content()
-            log(f"🔎 Fetched HTML length: {len(content)}")
+            log(f"🔎 HTML length: {len(content)}")
         except Exception as e:
             log(f"❌ Error fetching {url}: {e}")
             content = ""
         await browser.close()
         return content
 
+
 # -----------------------------
-# DDG fallback
+# DDG fallback search
 # -----------------------------
 def duck_search_listings(society, city, max_results=25):
     q = f"{society} {city} for rent site:nobroker.in"
     log(f"🔍 DDG fallback search: {q}")
+
     listings = []
     with DDGS() as ddgs:
         for r in ddgs.text(q, max_results=max_results):
@@ -116,83 +129,119 @@ def duck_search_listings(society, city, max_results=25):
             title = r.get("title") or ""
             if not href:
                 continue
+
+            # Clean redirect links
             href = re.sub(r'^.*uddg=', '', href) if "uddg=" in href else href
+
             href_low = href.lower()
-            if "nobroker.in/property" not in href_low or "for-rs-" not in href_low:
+            if "nobroker.in/property" not in href_low:
+                continue
+            if "for-rs-" not in href_low:
                 continue
             if is_bad_listing(href, title):
                 continue
+
             listings.append(href)
-    log(f"  DDG found {len(listings)} candidate listings")
+
+    log(f"  DDG found {len(listings)} listings")
     return listings
+
 
 # -----------------------------
 # Process listings
 # -----------------------------
 async def process_listing_urls(urls, society):
     grouped = {}
+
     for i, url in enumerate(urls, start=1):
         log(f"[{i}/{len(urls)}] Checking {url}")
+
         rent = extract_rent_from_url(url)
         html = await fetch_html(url)
+
         soup = BeautifulSoup(html, "html.parser")
         title = soup.find("h1").get_text(strip=True) if soup.find("h1") else ""
+
         if society.lower() not in title.lower() and society.lower() not in url.lower():
-            log(f"  Skipped: does not match society")
+            log("  Skipped: not matching society")
             continue
+
         bhk = extract_bhk_from_text(title) or extract_bhk_from_text(url)
         if rent is None:
             rent = parse_int_from_text(html)
+
         if not bhk or rent is None:
-            log(f"  Skipped: missing bhk or rent")
+            log("  Skipped: missing BHK or rent")
             continue
+
         # sanity filters
         if rent >= 500_000:
-            log(f"  Skipped: too high rent {rent}")
+            log(f"  Skipped: too high rent: {rent}")
             continue
+
         try:
             bhk_num = int(re.search(r'(\d+)', bhk).group(1))
         except:
             bhk_num = None
+
         if bhk_num and bhk_num >= 2 and rent < 20000:
-            log(f"  Skipped: too low rent for {bhk} -> {rent}")
+            log(f"  Skipped: too low for {bhk}: {rent}")
             continue
         if bhk_num == 1 and rent < 5000:
-            log(f"  Skipped: too low rent for 1 BHK -> {rent}")
+            log(f"  Skipped: too low for 1 BHK: {rent}")
             continue
+
         grouped.setdefault(bhk, []).append(rent)
-        log(f"  Collected {bhk} -> ₹{rent:,}")
+        log(f"  ✔ Collected {bhk} → ₹{rent:,}")
+
     best = {bhk: max(rents) for bhk, rents in grouped.items()}
     log(f"✅ Best rents per BHK: {best}")
     return best
+
 
 # -----------------------------
 # Orchestrator
 # -----------------------------
 async def scrape_for_society(society, city):
     log(f"\n=== 🏙 FETCHING FOR: {society}, {city} ===")
+
     candidates = build_society_url_candidates(society, city)
     all_urls = []
+
     for u in candidates:
         html = await fetch_html(u)
         urls = extract_listing_urls_from_html(html)
-        log(f"  Candidate {u} found {len(urls)} listing URLs")
+        log(f"  Candidate {u} → {len(urls)} listings")
+
         if urls:
             all_urls.extend(urls)
             break
-    all_urls = list(dict.fromkeys(all_urls))  # dedupe
+
+    # dedupe
+    all_urls = list(dict.fromkeys(all_urls))
+
     if not all_urls:
-        log("No society-page listings found, using DDG fallback")
-        ddg_urls = duck_search_listings(society, city, max_results=30)
-        all_urls.extend(ddg_urls)
+        log("⚠️ No listings from society page, trying DDG fallback…")
+        all_urls = duck_search_listings(society, city, max_results=30)
+
     if not all_urls:
         log("❌ No listings found even after DDG fallback")
         return {}
+
     best = await process_listing_urls(all_urls, society)
     return best
 
+
 # -----------------------------
-# FastAPI endpoint
+# Root health endpoint (IMPORTANT FOR RENDER)
+# -----------------------------
+@app.get("/")
+def home():
+    return {"status": "OK", "message": "Rent backend running"}
+
+
+# -----------------------------
+# Main API endpoint
 # -----------------------------
 @app.get("/rent")
 async def get_rent(society: str = Query(...), city: str = Query(...)):
