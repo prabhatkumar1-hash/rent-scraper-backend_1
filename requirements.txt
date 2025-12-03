@@ -1,6 +1,6 @@
 fastapi
-uvicorn[standard]
-httpx
+uvicorn
 beautifulsoup4
-lxml
-pydantic
+ddgs
+playwright
+httpx
