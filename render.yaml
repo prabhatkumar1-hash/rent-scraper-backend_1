@@ -5,15 +5,11 @@ services:
     plan: free
     region: frankfurt
 
-    # Specify Node.js version for Playwright
-    nodeVersion: "20"
-
+    # Install dependencies AND download Playwright Chromium
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-
-    postDeployCommand: |
-      playwright install --with-deps chromium
+      playwright install chromium
 
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
 
