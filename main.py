@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-import asyncio
-from playwright.async_api import async_playwright, Error as PlaywrightError
+from playwright.async_api import async_playwright
 import urllib.parse
 
 app = FastAPI(title="Rent Scraper")
@@ -11,11 +10,13 @@ app = FastAPI(title="Rent Scraper")
 # -------------------------------
 async def fetch_html(url: str) -> str:
     async with async_playwright() as pw:
-        await pw.chromium.install()
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
         context = await browser.new_context()
         page = await context.new_page()
-        await page.goto(url)
+        await page.goto(url, wait_until="networkidle")
         html = await page.content()
         await browser.close()
         return html
@@ -24,18 +25,18 @@ async def fetch_html(url: str) -> str:
 # SCRAPE LOGIC (example)
 # -------------------------------
 async def scrape_for_society(society: str, city: str):
-    """
-    Scrapes rent listings for a given society & city.
-    Modify this function with your actual scraping logic.
-    """
     query = urllib.parse.quote(society)
     city_enc = urllib.parse.quote(city)
-    url = f"https://example.com/rent?society={query}&city={city_enc}"  # Replace with actual URL
+    
+    # Replace with your real scraping URL
+    url = f"https://example.com/rent?society={query}&city={city_enc}"
 
     html = await fetch_html(url)
-    
-    # Example: return raw HTML (you should parse it)
-    return {"society": society, "city": city, "html_length": len(html)}
+    return {
+        "society": society,
+        "city": city,
+        "html_length": len(html)
+    }
 
 # -------------------------------
 # API ENDPOINT
@@ -45,16 +46,11 @@ async def get_rent(
     society: str = Query(..., description="Name of the society"),
     city: str = Query(..., description="City name")
 ):
-    """
-    Returns rent listings for a society.
-    """
     try:
         result = await scrape_for_society(society, city)
         return JSONResponse(content=result)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -------------------------------
 # HEALTH CHECK
@@ -63,9 +59,6 @@ async def get_rent(
 def root():
     return {"status": "ok", "message": "Rent Scraper API is running."}
 
-# -------------------------------
-# MAIN ENTRYPOINT (for local dev)
-# -------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
