@@ -2,5 +2,4 @@ fastapi
 uvicorn
 beautifulsoup4
 ddgs
-playwright
 httpx
