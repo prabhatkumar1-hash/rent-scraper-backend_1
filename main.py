@@ -10,25 +10,15 @@ app = FastAPI(title="Rent Scraper")
 # UTILITY: Fetch HTML for a URL
 # -------------------------------
 async def fetch_html(url: str) -> str:
-    """
-    Fetch HTML content of a URL using Playwright Chromium headless.
-    Automatically installs browsers if missing.
-    """
-    try:
-        async with async_playwright() as pw:
-            # Install browsers at runtime if not installed
-            await pw.chromium.install()  
-
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-            await page.goto(url)
-            html = await page.content()
-            await browser.close()
-            return html
-
-    except PlaywrightError as e:
-        raise RuntimeError(f"Playwright error: {e}")
+    async with async_playwright() as pw:
+        await pw.chromium.install()
+        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto(url)
+        html = await page.content()
+        await browser.close()
+        return html
 
 # -------------------------------
 # SCRAPE LOGIC (example)
