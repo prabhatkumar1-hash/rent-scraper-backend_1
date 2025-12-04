@@ -12,14 +12,15 @@ async def fetch_html(url: str) -> str:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
         context = await browser.new_context()
         page = await context.new_page()
-        await page.goto(url, wait_until="networkidle")
+        await page.goto(url, timeout=60000)
         html = await page.content()
         await browser.close()
         return html
+
 
 # -------------------------------
 # SCRAPE LOGIC (example)
